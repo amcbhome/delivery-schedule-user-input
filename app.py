@@ -198,11 +198,11 @@ scipy>=1.11
 A Streamlit app that minimises delivery cost from 3 depots to 3 stores using a classic transportation linear program.
 
 ## Features
-- Editable **Distance** (miles) and **Rate** (£/mile) 3×3 matrices
-- Editable **Depot Supply** and **Store Capacity** rows (1×3)
-- Cost matrix computed as *Distance × Rate*
-- **Auto‑balance totals** option adds a zero‑cost dummy depot/store if total supply ≠ total demand
-- Shows **Cost of delivery** (total minimum £) with optional plan/cost matrix expanders
+#- Editable **Distance** (miles) and **Rate** (£/mile) 3×3 matrices
+#- Editable **Depot Supply** and **Store Capacity** rows (1×3)
+#- Cost matrix computed as *Distance × Rate*
+#- **Auto‑balance totals** option adds a zero‑cost dummy depot/store if total supply ≠ total demand
+#- Shows **Cost of delivery** (total minimum £) with optional plan/cost matrix expanders
 
 ## Run locally
 ```bash
