@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-# Delivery Schedule Optimiser — compact UI
+# Delivery Schedule Optimiser — compact UI with grouped headings
 # - Sidebar: Google Maps Distance Matrix 3x3 fetch (miles)
-# - Main page: single-row form: D1..D3 supply, S1..S3 capacity, Rate per mile (GBP)
+# - Main page: single, compact form (3 depot supplies, 3 store capacities, 1 rate)
 # - Totals must match (no auto-balance)
 # - Output: single line "Optimised cost of delivery: £X" (no decimals)
 # - Optional XLSX download of the optimised schedule
-# - All comments use '#'
 
 import io
 import numpy as np
@@ -106,7 +105,7 @@ with st.sidebar:
                 st.error(f"Request failed: {e}")
 
 # ---------------------------------------------------------------------
-# Main form — single row (6 inputs + rate), labelled with postcodes
+# Main form — grouped headings + compact inputs
 # ---------------------------------------------------------------------
 # Fallback labels if a postcode is blank
 d1_label = (d1.strip() if 'd1' in locals() else "").upper() or "D1"
@@ -117,38 +116,49 @@ s2_label = (s2.strip() if 's2' in locals() else "").upper() or "S2"
 s3_label = (s3.strip() if 's3' in locals() else "").upper() or "S3"
 
 with st.form("delivery_form", clear_on_submit=False):
-    cols = st.columns([1, 1, 1, 1, 1, 1, 0.9], gap="small")
+    # Heading row: spans match the groups below so headings won't get cut off
+    hdr_left, hdr_right, hdr_rate = st.columns([3, 3, 0.9], gap="small")
+    with hdr_left:
+        st.markdown("**Quantity at depot**")
+    with hdr_right:
+        st.markdown("**Capacity at stores**")
+    with hdr_rate:
+        st.markdown("**Rate (GBP/mi)**")
 
-    # Depot supplies
-    with cols[0]:
-        st.caption(d1_label)
-        d1_supply = st.number_input("D1", key="d1_supply", min_value=0, step=50,
-                                    value=2500, label_visibility="collapsed", format="%d")
-    with cols[1]:
-        st.caption(d2_label)
-        d2_supply = st.number_input("D2", key="d2_supply", min_value=0, step=50,
-                                    value=3100, label_visibility="collapsed", format="%d")
-    with cols[2]:
-        st.caption(d3_label)
-        d3_supply = st.number_input("D3", key="d3_supply", min_value=0, step=50,
-                                    value=1250, label_visibility="collapsed", format="%d")
+    # Inputs row: three groups aligned to headings
+    left_grp, right_grp, rate_grp = st.columns([3, 3, 0.9], gap="small")
 
-    # Store capacities
-    with cols[3]:
-        st.caption(s1_label)
-        s1_cap = st.number_input("S1", key="s1_cap", min_value=0, step=50,
-                                 value=2400, label_visibility="collapsed", format="%d")
-    with cols[4]:
-        st.caption(s2_label)
-        s2_cap = st.number_input("S2", key="s2_cap", min_value=0, step=50,
-                                 value=2400, label_visibility="collapsed", format="%d")
-    with cols[5]:
-        st.caption(s3_label)
-        s3_cap = st.number_input("S3", key="s3_cap", min_value=0, step=50,
-                                 value=2050, label_visibility="collapsed", format="%d")
+    with left_grp:
+        l1, l2, l3 = st.columns(3, gap="small")
+        with l1:
+            st.caption(d1_label)
+            d1_supply = st.number_input("D1", key="d1_supply", min_value=0, step=50,
+                                        value=2500, label_visibility="collapsed", format="%d")
+        with l2:
+            st.caption(d2_label)
+            d2_supply = st.number_input("D2", key="d2_supply", min_value=0, step=50,
+                                        value=3100, label_visibility="collapsed", format="%d")
+        with l3:
+            st.caption(d3_label)
+            d3_supply = st.number_input("D3", key="d3_supply", min_value=0, step=50,
+                                        value=1250, label_visibility="collapsed", format="%d")
 
-    # Rate per mile
-    with cols[6]:
+    with right_grp:
+        r1, r2, r3 = st.columns(3, gap="small")
+        with r1:
+            st.caption(s1_label)
+            s1_cap = st.number_input("S1", key="s1_cap", min_value=0, step=50,
+                                     value=2400, label_visibility="collapsed", format="%d")
+        with r2:
+            st.caption(s2_label)
+            s2_cap = st.number_input("S2", key="s2_cap", min_value=0, step=50,
+                                     value=2400, label_visibility="collapsed", format="%d")
+        with r3:
+            st.caption(s3_label)
+            s3_cap = st.number_input("S3", key="s3_cap", min_value=0, step=50,
+                                     value=2050, label_visibility="collapsed", format="%d")
+
+    with rate_grp:
         st.caption("Rate (GBP/mi)")
         rate_per_mile = st.number_input("Rate", key="rate_per_mile", min_value=0.0,
                                         step=0.10, value=5.00, label_visibility="collapsed", format="%.2f")
@@ -213,17 +223,13 @@ if submitted:
     if want_xlsx:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            # optimised plan (units)
             plan_df.to_excel(writer, sheet_name="Optimised Plan")
-            # cost per unit matrix (GBP)
             pd.DataFrame(cost, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
                 writer, sheet_name="Cost Matrix (GBP/unit)"
             )
-            # distance matrix (miles)
             pd.DataFrame(dist, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
                 writer, sheet_name="Distance (miles)"
             )
-            # supply and demand for reference
             pd.DataFrame([supply], index=["Supply"], columns=["D1", "D2", "D3"]).to_excel(
                 writer, sheet_name="Supply"
             )
@@ -236,5 +242,4 @@ if submitted:
             file_name="delivery_schedule_optimised.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
 
