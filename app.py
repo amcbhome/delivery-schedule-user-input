@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-# Delivery Schedule Optimiser — compact UI with grouped headings
-# - Sidebar: Google Maps Distance Matrix 3x3 fetch (miles)
-# - Main page: single, compact form (3 depot supplies, 3 store capacities, 1 rate)
+# Delivery Schedule Optimiser — compact UI with postcode→town labels
+# - Sidebar: Google Maps 3x3 Distance Matrix + "Look up place names" (Geocoding API)
+# - Main page: 3 depot supplies, 3 store capacities, 1 rate (compact row)
 # - Totals must match (no auto-balance)
-# - Output: single line "Optimised cost of delivery: £X" (no decimals)
-# - Optional XLSX download of the optimised schedule
+# - Output: "Optimised cost of delivery: £X" (no decimals)
+# - Optional XLSX download
 
 import io
 import numpy as np
@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 from scipy.optimize import linprog
 
-# Optional: Google Maps client (install 'googlemaps'; set key in secrets or sidebar)
+# Optional Google Maps client (Distance Matrix + Geocoding)
 try:
     import googlemaps  # noqa: F401
 except Exception:
@@ -24,7 +24,6 @@ except Exception:
 st.set_page_config(page_title="Delivery Schedule Optimiser", layout="wide")
 st.title("Delivery Schedule Optimiser")
 
-# Compact spacing for inputs/buttons
 st.markdown(
     """
 <style>
@@ -38,7 +37,7 @@ div.stButton > button { padding: .4rem .8rem; }
 )
 
 # ---------------------------------------------------------------------
-# Session state: 3x3 distance matrix (D1..D3 -> S1..S3), edited via sidebar
+# State: 3x3 distance matrix; postcode→label cache
 # ---------------------------------------------------------------------
 def default_distance():
     return pd.DataFrame(
@@ -50,26 +49,53 @@ def default_distance():
 
 if "dist_df" not in st.session_state:
     st.session_state.dist_df = default_distance()
+if "pc_labels" not in st.session_state:
+    st.session_state.pc_labels = {}  # e.g., {"D1": "PA3 3BW (Paisley)"}
 
 # ---------------------------------------------------------------------
-# Sidebar — Google Maps Distance Matrix helper (fills the distance matrix)
+# Helpers
+# ---------------------------------------------------------------------
+def extract_town_from_components(components):
+    # Prefer UK 'postal_town', then 'locality', then county/region
+    prefs = ["postal_town", "locality", "administrative_area_level_2", "administrative_area_level_1"]
+    for pref in prefs:
+        for comp in components:
+            if pref in comp.get("types", []):
+                return comp.get("long_name", "")
+    return ""
+
+def geocode_postcode(gmaps, postcode):
+    # Returns a nice "POSTCODE (Town)" label if possible
+    try:
+        res = gmaps.geocode(postcode, components={"country": "GB"})
+        if not res:
+            return postcode.upper()
+        comps = res[0].get("address_components", [])
+        town = extract_town_from_components(comps)
+        return f"{postcode.upper()} ({town})" if town else postcode.upper()
+    except Exception:
+        return postcode.upper()
+
+# ---------------------------------------------------------------------
+# Sidebar — Google Maps distance + place names
 # ---------------------------------------------------------------------
 with st.sidebar:
     st.header("Driving distance (Google Maps)")
-    st.caption("Fetch the 3×3 distance matrix in miles. The main form uses this matrix.")
+    st.caption("Fetch the 3×3 distance matrix in miles. Use 'Look up place names' to show towns next to postcodes.")
 
     default_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "") if hasattr(st, "secrets") else ""
     api_key = st.text_input("Google Maps API key", value=default_key, type="password")
 
     st.subheader("Auto-fill 3×3 matrix from postcodes")
-    d1 = st.text_input("Depot D1 postcode", value="PA3 3BW")
-    d2 = st.text_input("Depot D2 postcode", value="G2 1DU")
-    d3 = st.text_input("Depot D3 postcode", value="KA1 1AA")
-    s1 = st.text_input("Store S1 postcode", value="CA11 9EU")
-    s2 = st.text_input("Store S2 postcode", value="EH1 1YZ")
-    s3 = st.text_input("Store S3 postcode", value="DG1 2BD")
+    d1_pc = st.text_input("Depot D1 postcode", value="PA3 3BW")
+    d2_pc = st.text_input("Depot D2 postcode", value="G2 1DU")
+    d3_pc = st.text_input("Depot D3 postcode", value="KA1 1AA")
+    s1_pc = st.text_input("Store S1 postcode", value="CA11 9EU")
+    s2_pc = st.text_input("Store S2 postcode", value="EH1 1YZ")
+    s3_pc = st.text_input("Store S3 postcode", value="DG1 2BD")
     round_miles = st.checkbox("Round to 1 decimal place", value=True)
 
+    # Fetch distances
     if st.button("Fetch distances (3×3)"):
         if not api_key:
             st.error("Please provide an API key.")
@@ -79,8 +105,8 @@ with st.sidebar:
             try:
                 gmaps = googlemaps.Client(key=api_key)
                 resp = gmaps.distance_matrix(
-                    origins=[d1, d2, d3],
-                    destinations=[s1, s2, s3],
+                    origins=[d1_pc, d2_pc, d3_pc],
+                    destinations=[s1_pc, s2_pc, s3_pc],
                     mode="driving",
                     units="imperial",
                     region="uk",
@@ -104,19 +130,39 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Request failed: {e}")
 
+    # Look up place names (uses Geocoding API)
+    if st.button("Look up place names"):
+        if not api_key:
+            st.error("Please provide an API key.")
+        elif googlemaps is None:
+            st.error("Package 'googlemaps' is not installed.")
+        else:
+            try:
+                gmaps = googlemaps.Client(key=api_key)
+                labels = {}
+                for code, key in [(d1_pc, "D1"), (d2_pc, "D2"), (d3_pc, "D3"),
+                                  (s1_pc, "S1"), (s2_pc, "S2"), (s3_pc, "S3")]:
+                    labels[key] = geocode_postcode(gmaps, code)
+                st.session_state.pc_labels = labels
+                st.success("Labels updated (postcode + town).")
+            except Exception as e:
+                st.error(f"Lookup failed: {e}")
+
 # ---------------------------------------------------------------------
-# Main form — grouped headings + compact inputs
+# Main form — grouped headings + postcode+town captions
 # ---------------------------------------------------------------------
-# Fallback labels if a postcode is blank
-d1_label = (d1.strip() if 'd1' in locals() else "").upper() or "D1"
-d2_label = (d2.strip() if 'd2' in locals() else "").upper() or "D2"
-d3_label = (d3.strip() if 'd3' in locals() else "").upper() or "D3"
-s1_label = (s1.strip() if 's1' in locals() else "").upper() or "S1"
-s2_label = (s2.strip() if 's2' in locals() else "").upper() or "S2"
-s3_label = (s3.strip() if 's3' in locals() else "").upper() or "S3"
+def label_for(key_fallback, default_code):
+    # Use postcode label if we have one; else the raw postcode (from sidebar); else default code
+    return st.session_state.pc_labels.get(key_fallback) or default_code.upper() or key_fallback
+
+d1_label = label_for("D1", d1_pc if "d1_pc" in locals() else "D1")
+d2_label = label_for("D2", d2_pc if "d2_pc" in locals() else "D2")
+d3_label = label_for("D3", d3_pc if "d3_pc" in locals() else "D3")
+s1_label = label_for("S1", s1_pc if "s1_pc" in locals() else "S1")
+s2_label = label_for("S2", s2_pc if "s2_pc" in locals() else "S2")
+s3_label = label_for("S3", s3_pc if "s3_pc" in locals() else "S3")
 
 with st.form("delivery_form", clear_on_submit=False):
-    # Heading row: spans match the groups below so headings won't get cut off
     hdr_left, hdr_right, hdr_rate = st.columns([3, 3, 0.9], gap="small")
     with hdr_left:
         st.markdown("**Quantity at depot**")
@@ -125,7 +171,6 @@ with st.form("delivery_form", clear_on_submit=False):
     with hdr_rate:
         st.markdown("**Rate (GBP/mi)**")
 
-    # Inputs row: three groups aligned to headings
     left_grp, right_grp, rate_grp = st.columns([3, 3, 0.9], gap="small")
 
     with left_grp:
@@ -176,15 +221,13 @@ def transport_min_cost(cost_mat, supply, demand):
 
     A_eq = []
     b_eq = []
-    # supply rows
-    for i in range(m):
+    for i in range(m):  # supply rows
         row = np.zeros(m * n)
         for j in range(n):
             row[i * n + j] = 1
         A_eq.append(row)
         b_eq.append(supply[i])
-    # demand cols
-    for j in range(n):
+    for j in range(n):  # demand cols
         row = np.zeros(m * n)
         for i in range(m):
             row[i * n + j] = 1
@@ -205,7 +248,6 @@ if submitted:
         )
         st.stop()
 
-    # Cost matrix = distance (from sidebar state) * single rate
     dist = st.session_state.dist_df.to_numpy(dtype=float)
     cost = dist * float(rate_per_mile)
 
@@ -242,4 +284,5 @@ if submitted:
             file_name="delivery_schedule_optimised.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
 
