@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # Delivery Schedule Optimiser — compact UI with postcode→town labels
-# - Store numbers are CAPACITIES (upper bounds). Model ships all depot supply, without exceeding capacities.
+# - Stores are CAPACITIES (upper bounds). Model ships all depot supply, without exceeding capacities.
 # - If total supply > total store capacity, show an error and stop.
-# - Sidebar: Google Maps 3x3 Distance Matrix (+ optional Geocoding for labels)
+# - Sidebar: Google Maps 3x3 Distance Matrix (via place IDs) + Geocoding for labels
 # - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
-# - On submit: show one-line cost and an optimised schedule table with totals.
+# - On submit: show one-line cost and an optimised schedule table (towns, with totals)
 
 import numpy as np
 import pandas as pd
@@ -18,7 +18,7 @@ except Exception:
     googlemaps = None
 
 # ------------------------------------------------------------------------------
-# Page + compact CSS (ensures the title is fully visible and captions can wrap)
+# Page + compact CSS
 # ------------------------------------------------------------------------------
 st.set_page_config(page_title="Delivery Schedule Optimiser", layout="wide")
 st.markdown(
@@ -52,12 +52,13 @@ if "dist_df" not in st.session_state:
     st.session_state.dist_df = default_distance()
 
 if "pc_labels" not in st.session_state:
-    st.session_state.pc_labels = {}  # e.g. {"D1": "PA3 3BW (Paisley)", ...}
+    st.session_state.pc_labels = {}  # e.g. {"D1": "PA3 3BW (Paisley)"}
 
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
 def extract_town_from_components(components):
+    # Prefer UK postal_town, then locality, then county/region
     prefs = ["postal_town", "locality", "administrative_area_level_2", "administrative_area_level_1"]
     for pref in prefs:
         for comp in components:
@@ -66,6 +67,7 @@ def extract_town_from_components(components):
     return ""
 
 def geocode_postcode(gmaps, postcode):
+    # Return "POSTCODE (Town)" where possible
     try:
         res = gmaps.geocode(postcode, components={"country": "GB"})
         if not res:
@@ -77,6 +79,7 @@ def geocode_postcode(gmaps, postcode):
         return postcode.upper()
 
 def label_for(slot_key, raw_pc_default):
+    # Cached "POSTCODE (Town)" if present; else the raw postcode; else slot key
     return st.session_state.pc_labels.get(slot_key) or (raw_pc_default.upper() if raw_pc_default else slot_key)
 
 def display_name(label: str) -> str:
@@ -115,27 +118,54 @@ with st.sidebar:
         else:
             try:
                 gmaps = googlemaps.Client(key=api_key)
+
+                # Geocode to place IDs for stability
+                def pid(pc):
+                    r = gmaps.geocode(pc, components={"country": "GB"})
+                    return r[0]["place_id"] if r else None
+
+                origin_pids = [pid(x) for x in [d1_pc, d2_pc, d3_pc]]
+                dest_pids   = [pid(x) for x in [s1_pc, s2_pc, s3_pc]]
+
+                if any(p is None for p in origin_pids + dest_pids):
+                    st.error("One or more postcodes could not be geocoded. Check them and try again.")
+                    st.stop()
+
                 resp = gmaps.distance_matrix(
-                    origins=[d1_pc, d2_pc, d3_pc],
-                    destinations=[s1_pc, s2_pc, s3_pc],
+                    origins=[f"place_id:{p}" for p in origin_pids],
+                    destinations=[f"place_id:{p}" for p in dest_pids],
                     mode="driving",
                     units="imperial",
                     region="uk",
                 )
-                miles = np.zeros((3, 3), dtype=float)
+
+                # Build miles matrix + a parallel status matrix
+                miles = np.full((3, 3), np.nan, dtype=float)
+                status = [[""] * 3 for _ in range(3)]
                 for i in range(3):
                     for j in range(3):
                         el = resp["rows"][i]["elements"][j]
+                        status[i][j] = el.get("status", "")
                         if el.get("status") == "OK":
                             meters = el["distance"]["value"]
                             mi = meters / 1609.344
                             miles[i, j] = round(mi, 1) if round_miles else mi
-                        else:
-                            miles[i, j] = 0.0
+
                 st.session_state.dist_df.loc[:, :] = miles
                 st.success("Distance matrix updated.")
 
-                # Auto-refresh labels via Geocoding (if enabled)
+                # Diagnostics: per-cell status and the distances
+                st.caption("Element statuses (non-OK means blank cell):")
+                st.dataframe(
+                    pd.DataFrame(status, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]),
+                    use_container_width=True
+                )
+                st.dataframe(
+                    pd.DataFrame(miles, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]),
+                    use_container_width=True
+                )
+
+                # Refresh postcode→town labels
                 try:
                     labels = {}
                     for code, key in [(d1_pc, "D1"), (d2_pc, "D2"), (d3_pc, "D3"),
@@ -143,13 +173,9 @@ with st.sidebar:
                         labels[key] = geocode_postcode(gmaps, code)
                     st.session_state.pc_labels = labels
                     st.success("Labels updated (postcode + town).")
-                except Exception as e:
-                    st.warning(f"Distances fetched but place names not updated: {e}")
+                except Exception:
+                    pass
 
-                st.dataframe(
-                    pd.DataFrame(miles, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]),
-                    use_container_width=True
-                )
             except Exception as e:
                 st.error(f"Request failed: {e}")
 
@@ -274,7 +300,7 @@ if submitted:
     supply = np.array([d1_supply, d2_supply, d3_supply], dtype=float)
     capacity = np.array([s1_cap, s2_cap, s3_cap], dtype=float)
 
-    # Correct feasibility rule: total delivered (total supply) must be <= total store capacity
+    # Feasibility: total delivered (total supply) must be <= total store capacity
     if supply.sum() > capacity.sum():
         st.error(
             f"Total supply ({int(supply.sum()):,}) exceeds total store capacity "
@@ -282,8 +308,12 @@ if submitted:
         )
         st.stop()
 
+    # Compute cost matrix; replace missing distances (NaN) with a huge number to avoid those routes
     dist = st.session_state.dist_df.to_numpy(dtype=float)
-    cost = dist * float(rate_per_mile)
+    if np.isnan(dist).any():
+        st.warning("Some routes had no distance; assigning a very large cost to discourage their use.")
+    dist_filled = np.where(np.isnan(dist), 1e9, dist)  # huge miles so they won't be chosen
+    cost = dist_filled * float(rate_per_mile)
 
     res = transport_min_cost_with_capacity(cost, supply, capacity)
     if not res.success:
@@ -292,12 +322,11 @@ if submitted:
 
     plan = res.x.reshape(3, 3)
 
-    # ---- Present results ----
-    # Cost (compute from unrounded plan), then display no decimals with thousands separators
+    # Cost (from unrounded plan)
     total_cost = int(round((plan * cost).sum(), 0))
     st.success(f"Optimised cost of delivery: £{total_cost:,}")
 
-    # Build a human-friendly table: towns as headers if available
+    # Build a human-friendly table with towns and totals
     depot_labels = [display_name(d1_label), display_name(d2_label), display_name(d3_label)]
     store_labels = [display_name(s1_label), display_name(s2_label), display_name(s3_label)]
 
