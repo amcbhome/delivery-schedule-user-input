@@ -2,7 +2,7 @@
 # TV Delivery Optimizer (3x3 transportation model)
 # - Streamlit UI for distance, rate, supply, demand
 # - Linear program solved with SciPy linprog (HiGHS)
-# - Optional Google Maps Distance Matrix helper in the sidebar (driving distance between two postcodes)
+# - Google Maps Distance Matrix helper: single pair and 3x3 matrix from postcodes
 
 import os
 import numpy as np
@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from scipy.optimize import linprog
 
-# Optional: Google Maps client (install 'googlemaps' and set key in Streamlit secrets)
+# Optional: Google Maps client (install 'googlemaps' and set key)
 try:
     import googlemaps  # noqa: F401
 except Exception:
@@ -57,27 +57,31 @@ def default_inputs():
 # Load defaults
 dist_df, rate_df, supply_row, demand_row = default_inputs()
 
-# Sidebar - optional Google Maps driving distance helper
+# -----------------------------
+# Sidebar: Google Maps helpers
+# -----------------------------
 with st.sidebar:
     st.header("Driving distance (Google Maps)")
-    st.caption("Distance Matrix API: driving distance between two UK postcodes. Provide an API key in secrets or below.")
+    st.caption("Distance Matrix API. Provide a Maps API key in secrets or below.")
 
     # Prefer secrets, allow manual entry
     default_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "") if hasattr(st, "secrets") else ""
     api_key = st.text_input("Google Maps API key", value=default_key, type="password")
-    origin_pc = st.text_input("Origin postcode", value="PA3 3BW")
-    dest_pc = st.text_input("Destination postcode", value="CA11 9EU")
-    use_imperial = st.toggle("Use miles (imperial)", value=True)
 
-    if st.button("Fetch driving distance"):
+    # --- Single pair helper ---
+    st.subheader("Single pair")
+    origin_pc = st.text_input("Origin postcode", value="PA3 3BW", key="single_origin")
+    dest_pc = st.text_input("Destination postcode", value="CA11 9EU", key="single_dest")
+    use_imperial_single = st.toggle("Use miles (imperial)", value=True, key="single_units")
+    if st.button("Fetch driving distance", key="btn_single"):
         if not api_key:
             st.error("Please provide an API key.")
         elif googlemaps is None:
-            st.error("The optional package 'googlemaps' is not installed. Add it to requirements.txt and redeploy.")
+            st.error("Package 'googlemaps' not installed.")
         else:
             try:
                 gmaps = googlemaps.Client(key=api_key)
-                units = "imperial" if use_imperial else "metric"
+                units = "imperial" if use_imperial_single else "metric"
                 resp = gmaps.distance_matrix(
                     origins=[origin_pc],
                     destinations=[dest_pc],
@@ -85,18 +89,83 @@ with st.sidebar:
                     units=units,
                     region="uk",
                 )
-                element = resp["rows"][0]["elements"][0]
-                if element.get("status") != "OK":
-                    st.error(f"API status: {element.get('status')}")
+                el = resp["rows"][0]["elements"][0]
+                if el.get("status") != "OK":
+                    st.error(f"API status: {el.get('status')}")
                 else:
-                    dist_text = element["distance"]["text"]
-                    dist_m = element["distance"]["value"]
-                    dur_text = element["duration"]["text"]
+                    dist_text = el["distance"]["text"]
+                    dist_m = el["distance"]["value"]
+                    dur_text = el["duration"]["text"]
                     miles = dist_m / 1609.344
                     st.success(f"Driving distance: {dist_text} ({miles:,.1f} mi), duration: {dur_text}")
             except Exception as e:
                 st.error(f"Request failed: {e}")
 
+    # --- 3x3 matrix helper ---
+    st.subheader("Auto-fill 3x3 matrix from postcodes")
+    st.caption("Enter 3 depot postcodes and 3 store postcodes. Fetch fills the Distance 3x3 table (miles).")
+
+    # Depot postcodes
+    d1 = st.text_input("Depot D1 postcode", value="PA3 3BW")
+    d2 = st.text_input("Depot D2 postcode", value="G2 1DU")
+    d3 = st.text_input("Depot D3 postcode", value="KA1 1AA")
+
+    # Store postcodes
+    s1 = st.text_input("Store S1 postcode", value="CA11 9EU")
+    s2 = st.text_input("Store S2 postcode", value="EH1 1YZ")
+    s3 = st.text_input("Store S3 postcode", value="DG1 2BD")
+
+    round_miles = st.checkbox("Round to 1 decimal", value=True)
+    use_imperial_matrix = st.checkbox("Use miles (imperial) for API request", value=True)
+
+    if st.button("Fetch 3x3 driving distances", key="btn_matrix"):
+        if not api_key:
+            st.error("Please provide an API key.")
+        elif googlemaps is None:
+            st.error("Package 'googlemaps' not installed.")
+        else:
+            try:
+                gmaps = googlemaps.Client(key=api_key)
+                units = "imperial" if use_imperial_matrix else "metric"
+
+                # Call Distance Matrix once with 3 origins and 3 destinations
+                origins = [d1, d2, d3]
+                destinations = [s1, s2, s3]
+
+                with st.spinner("Fetching distances..."):
+                    resp = gmaps.distance_matrix(
+                        origins=origins,
+                        destinations=destinations,
+                        mode="driving",
+                        units=units,
+                        region="uk",
+                    )
+
+                # Parse response into a 3x3 miles matrix (value is in meters)
+                miles_mat = np.zeros((3, 3), dtype=float)
+                for i in range(3):
+                    row = resp["rows"][i]["elements"]
+                    for j in range(3):
+                        el = row[j]
+                        if el.get("status") == "OK":
+                            meters = el["distance"]["value"]
+                            miles = meters / 1609.344
+                            miles_mat[i, j] = round(miles, 1) if round_miles else miles
+                        else:
+                            # Leave as 0 if not OK; you could also raise an error
+                            miles_mat[i, j] = 0.0
+
+                # Overwrite the Distance 3x3 editor with fetched miles
+                dist_df.loc[:, :] = miles_mat
+                st.success("Distance matrix updated from postcodes.")
+                st.dataframe(pd.DataFrame(miles_mat, index=["D1","D2","D3"], columns=["S1","S2","S3"]),
+                             use_container_width=True)
+            except Exception as e:
+                st.error(f"Request failed: {e}")
+
+# -----------------------------
+# Inputs (editable tables)
+# -----------------------------
 # Editable Distance (miles) and Rate (GBP/mile) 3x3 matrices
 # Editable Depot Supply and Store Capacity rows (1x3)
 st.subheader("Inputs")
@@ -129,7 +198,9 @@ with col_demand:
 # Auto-balance option
 auto_balance = st.checkbox("Auto-balance totals with a dummy node (zero cost)", value=True)
 
+# -----------------------------
 # Build cost matrix and vectors
+# -----------------------------
 try:
     dist = dist_df.to_numpy(dtype=float)
     rate = rate_df.to_numpy(dtype=float)
@@ -142,7 +213,9 @@ sup = supply_row.to_numpy(dtype=float).ravel()
 dem = demand_row.to_numpy(dtype=float).ravel()
 sum_sup, sum_dem = float(sup.sum()), float(dem.sum())
 
+# -----------------------------
 # Transportation model
+# -----------------------------
 def transport_min_cost(cost_mat, supply, demand):
     # Solve min sum(c_ij * x_ij) subject to row/col sums, x_ij >= 0
     m, n = cost_mat.shape
@@ -235,5 +308,4 @@ with st.expander("Show cost matrix (GBP per unit)"):
         use_container_width=True
     )
 
-st.caption("Built with SciPy linprog (HiGHS). Optional driving distances via Google Maps Distance Matrix API.")
-
+st.caption("Built with SciPy linprog (HiGHS). Driving distances via Google Maps Distance Matrix API.")
