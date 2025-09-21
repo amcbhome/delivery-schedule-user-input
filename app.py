@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Delivery Schedule Optimiser — compact UI with postcode→town labels
-# - Sidebar: Google Maps 3x3 Distance Matrix + "Look up place names" (Geocoding API)
-# - Main page: 3 depot supplies, 3 store capacities, 1 rate (compact row)
+# - Sidebar: Google Maps 3×3 Distance Matrix (+ optional Geocoding for labels)
+# - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
 # - Totals must match (no auto-balance)
 # - Output: "Optimised cost of delivery: £X" (no decimals)
 # - Optional XLSX download
@@ -18,27 +18,34 @@ try:
 except Exception:
     googlemaps = None
 
-# ---------------------------------------------------------------------
-# Page + compact CSS
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Page + compact CSS (ensures the title is fully visible and captions can wrap)
+# ------------------------------------------------------------------------------
 st.set_page_config(page_title="Delivery Schedule Optimiser", layout="wide")
-st.title("Delivery Schedule Optimiser")
-
 st.markdown(
     """
 <style>
-.block-container { padding-top: 1rem; padding-bottom: 1rem; }
+/* generous top padding so the title is never clipped */
+.block-container { padding-top: 2rem; padding-bottom: 1rem; }
+/* custom title that wraps cleanly */
+.app-title { font-size: 2rem; font-weight: 700; margin: 0 0 1rem 0;
+             line-height: 1.2; white-space: normal; overflow-wrap: anywhere; }
+/* compact inputs */
 div[data-testid="stNumberInput"] { margin-bottom: .25rem; }
 div[data-testid="stNumberInput"] input { padding-top: .25rem; padding-bottom: .25rem; }
-div.stButton > button { padding: .4rem .8rem; }
+/* small, wrapping captions for postcode + town */
+.small-caption { white-space: normal; font-size: 0.78rem; opacity: .8; margin-bottom: .25rem; }
+/* slimmer buttons */
+div.stButton > button, button[kind="primary"] { padding: .4rem .8rem; }
 </style>
 """,
     unsafe_allow_html=True,
 )
+st.markdown('<div class="app-title">Delivery Schedule Optimiser</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------
-# State: 3x3 distance matrix; postcode→label cache
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# State: 3×3 distance matrix; postcode→label cache
+# ------------------------------------------------------------------------------
 def default_distance():
     return pd.DataFrame(
         [[10, 20, 30],
@@ -49,14 +56,16 @@ def default_distance():
 
 if "dist_df" not in st.session_state:
     st.session_state.dist_df = default_distance()
-if "pc_labels" not in st.session_state:
-    st.session_state.pc_labels = {}  # e.g., {"D1": "PA3 3BW (Paisley)"}
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
+# postcode→"POSTCODE (Town)" labels used above inputs
+if "pc_labels" not in st.session_state:
+    st.session_state.pc_labels = {}  # {"D1": "PA3 3BW (Paisley)", ...}
+
+# ------------------------------------------------------------------------------
+# Helpers for Geocoding labels
+# ------------------------------------------------------------------------------
 def extract_town_from_components(components):
-    # Prefer UK 'postal_town', then 'locality', then county/region
+    # Prefer UK postal_town, then locality, then county/region
     prefs = ["postal_town", "locality", "administrative_area_level_2", "administrative_area_level_1"]
     for pref in prefs:
         for comp in components:
@@ -65,7 +74,7 @@ def extract_town_from_components(components):
     return ""
 
 def geocode_postcode(gmaps, postcode):
-    # Returns a nice "POSTCODE (Town)" label if possible
+    # Return "POSTCODE (Town)" where possible
     try:
         res = gmaps.geocode(postcode, components={"country": "GB"})
         if not res:
@@ -76,23 +85,24 @@ def geocode_postcode(gmaps, postcode):
     except Exception:
         return postcode.upper()
 
-# ---------------------------------------------------------------------
-# Sidebar — Google Maps distance + place names
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Sidebar — Google Maps Distance Matrix + place-name lookup
+# ------------------------------------------------------------------------------
 with st.sidebar:
     st.header("Driving distance (Google Maps)")
-    st.caption("Fetch the 3×3 distance matrix in miles. Use 'Look up place names' to show towns next to postcodes.")
+    st.caption("Fetch the 3×3 distance matrix in miles. Labels can show the town via Geocoding.")
 
     default_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "") if hasattr(st, "secrets") else ""
     api_key = st.text_input("Google Maps API key", value=default_key, type="password")
 
-    st.subheader("Auto-fill 3×3 matrix from postcodes")
+    st.subheader("Postcodes for depots and stores")
     d1_pc = st.text_input("Depot D1 postcode", value="PA3 3BW")
     d2_pc = st.text_input("Depot D2 postcode", value="G2 1DU")
     d3_pc = st.text_input("Depot D3 postcode", value="KA1 1AA")
     s1_pc = st.text_input("Store S1 postcode", value="CA11 9EU")
     s2_pc = st.text_input("Store S2 postcode", value="EH1 1YZ")
     s3_pc = st.text_input("Store S3 postcode", value="DG1 2BD")
+
     round_miles = st.checkbox("Round to 1 decimal place", value=True)
 
     # Fetch distances
@@ -123,6 +133,18 @@ with st.sidebar:
                             miles[i, j] = 0.0
                 st.session_state.dist_df.loc[:, :] = miles
                 st.success("Distance matrix updated.")
+
+                # Auto-refresh labels via Geocoding (if enabled)
+                try:
+                    labels = {}
+                    for code, key in [(d1_pc, "D1"), (d2_pc, "D2"), (d3_pc, "D3"),
+                                      (s1_pc, "S1"), (s2_pc, "S2"), (s3_pc, "S3")]:
+                        labels[key] = geocode_postcode(gmaps, code)
+                    st.session_state.pc_labels = labels
+                    st.success("Labels updated (postcode + town).")
+                except Exception as e:
+                    st.warning(f"Distances fetched but place names not updated: {e}")
+
                 st.dataframe(
                     pd.DataFrame(miles, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]),
                     use_container_width=True
@@ -130,7 +152,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Request failed: {e}")
 
-    # Look up place names (uses Geocoding API)
+    # Optional manual label refresh
     if st.button("Look up place names"):
         if not api_key:
             st.error("Please provide an API key.")
@@ -148,12 +170,12 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Lookup failed: {e}")
 
-# ---------------------------------------------------------------------
-# Main form — grouped headings + postcode+town captions
-# ---------------------------------------------------------------------
-def label_for(key_fallback, default_code):
-    # Use postcode label if we have one; else the raw postcode (from sidebar); else default code
-    return st.session_state.pc_labels.get(key_fallback) or default_code.upper() or key_fallback
+# ------------------------------------------------------------------------------
+# Main form — headings + compact inputs with wrapped captions
+# ------------------------------------------------------------------------------
+def label_for(slot_key, raw_pc_default):
+    # Use cached "POSTCODE (Town)" if present; else the raw postcode; else the slot key
+    return st.session_state.pc_labels.get(slot_key) or raw_pc_default.upper() or slot_key
 
 d1_label = label_for("D1", d1_pc if "d1_pc" in locals() else "D1")
 d2_label = label_for("D2", d2_pc if "d2_pc" in locals() else "D2")
@@ -163,6 +185,7 @@ s2_label = label_for("S2", s2_pc if "s2_pc" in locals() else "S2")
 s3_label = label_for("S3", s3_pc if "s3_pc" in locals() else "S3")
 
 with st.form("delivery_form", clear_on_submit=False):
+    # Headings row aligned with input groups
     hdr_left, hdr_right, hdr_rate = st.columns([3, 3, 0.9], gap="small")
     with hdr_left:
         st.markdown("**Quantity at depot**")
@@ -171,49 +194,50 @@ with st.form("delivery_form", clear_on_submit=False):
     with hdr_rate:
         st.markdown("**Rate (GBP/mi)**")
 
+    # Inputs row
     left_grp, right_grp, rate_grp = st.columns([3, 3, 0.9], gap="small")
 
     with left_grp:
         l1, l2, l3 = st.columns(3, gap="small")
         with l1:
-            st.caption(d1_label)
+            st.markdown(f"<div class='small-caption'>{d1_label}</div>", unsafe_allow_html=True)
             d1_supply = st.number_input("D1", key="d1_supply", min_value=0, step=50,
                                         value=2500, label_visibility="collapsed", format="%d")
         with l2:
-            st.caption(d2_label)
+            st.markdown(f"<div class='small-caption'>{d2_label}</div>", unsafe_allow_html=True)
             d2_supply = st.number_input("D2", key="d2_supply", min_value=0, step=50,
                                         value=3100, label_visibility="collapsed", format="%d")
         with l3:
-            st.caption(d3_label)
+            st.markdown(f"<div class='small-caption'>{d3_label}</div>", unsafe_allow_html=True)
             d3_supply = st.number_input("D3", key="d3_supply", min_value=0, step=50,
                                         value=1250, label_visibility="collapsed", format="%d")
 
     with right_grp:
         r1, r2, r3 = st.columns(3, gap="small")
         with r1:
-            st.caption(s1_label)
+            st.markdown(f"<div class='small-caption'>{s1_label}</div>", unsafe_allow_html=True)
             s1_cap = st.number_input("S1", key="s1_cap", min_value=0, step=50,
                                      value=2400, label_visibility="collapsed", format="%d")
         with r2:
-            st.caption(s2_label)
+            st.markdown(f"<div class='small-caption'>{s2_label}</div>", unsafe_allow_html=True)
             s2_cap = st.number_input("S2", key="s2_cap", min_value=0, step=50,
                                      value=2400, label_visibility="collapsed", format="%d")
         with r3:
-            st.caption(s3_label)
+            st.markdown(f"<div class='small-caption'>{s3_label}</div>", unsafe_allow_html=True)
             s3_cap = st.number_input("S3", key="s3_cap", min_value=0, step=50,
                                      value=2050, label_visibility="collapsed", format="%d")
 
     with rate_grp:
-        st.caption("Rate (GBP/mi)")
+        st.markdown("<div class='small-caption'>Rate (GBP/mi)</div>", unsafe_allow_html=True)
         rate_per_mile = st.number_input("Rate", key="rate_per_mile", min_value=0.0,
                                         step=0.10, value=5.00, label_visibility="collapsed", format="%.2f")
 
     want_xlsx = st.checkbox("Offer an XLSX download of the optimised schedule")
     submitted = st.form_submit_button("Submit and optimise")
 
-# ---------------------------------------------------------------------
-# Solver
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Solver (transportation LP)
+# ------------------------------------------------------------------------------
 def transport_min_cost(cost_mat, supply, demand):
     m, n = cost_mat.shape
     c = cost_mat.reshape(-1)
@@ -221,13 +245,15 @@ def transport_min_cost(cost_mat, supply, demand):
 
     A_eq = []
     b_eq = []
-    for i in range(m):  # supply rows
+    # supply rows
+    for i in range(m):
         row = np.zeros(m * n)
         for j in range(n):
             row[i * n + j] = 1
         A_eq.append(row)
         b_eq.append(supply[i])
-    for j in range(n):  # demand cols
+    # demand cols
+    for j in range(n):
         row = np.zeros(m * n)
         for i in range(m):
             row[i * n + j] = 1
@@ -248,6 +274,7 @@ if submitted:
         )
         st.stop()
 
+    # Cost matrix = distance (from sidebar state) × rate
     dist = st.session_state.dist_df.to_numpy(dtype=float)
     cost = dist * float(rate_per_mile)
 
@@ -284,5 +311,4 @@ if submitted:
             file_name="delivery_schedule_optimised.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
 
