@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # Delivery Schedule Optimiser — compact UI with postcode→town labels
-# - Sidebar: Google Maps 3x3 Distance Matrix (+ optional Geocoding for labels)
+# - Store numbers are CAPACITIES (upper bounds). Model ships all depot supply, without exceeding capacities.
+# - If total supply > total store capacity, show an error and stop (user must adjust and resubmit).
+# - Sidebar: Google Maps 3x3 Distance Matrix (+ Geocoding for labels)
 # - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
-# - Totals must match (no auto-balance)
 # - Output: "Optimised cost of delivery: £X" (no decimals)
-# - Optional XLSX download
+# - Optional XLSX download (safe sheet names)
 
 import io
 import numpy as np
@@ -25,17 +26,12 @@ st.set_page_config(page_title="Delivery Schedule Optimiser", layout="wide")
 st.markdown(
     """
 <style>
-/* generous top padding so the title is never clipped */
 .block-container { padding-top: 2rem; padding-bottom: 1rem; }
-/* custom title that wraps cleanly */
 .app-title { font-size: 2rem; font-weight: 700; margin: 0 0 1rem 0;
              line-height: 1.2; white-space: normal; overflow-wrap: anywhere; }
-/* compact inputs */
 div[data-testid="stNumberInput"] { margin-bottom: .25rem; }
 div[data-testid="stNumberInput"] input { padding-top: .25rem; padding-bottom: .25rem; }
-/* small, wrapping captions for postcode + town */
 .small-caption { white-space: normal; font-size: 0.78rem; opacity: .8; margin-bottom: .25rem; }
-/* slimmer buttons */
 div.stButton > button, button[kind="primary"] { padding: .4rem .8rem; }
 </style>
 """,
@@ -47,7 +43,6 @@ st.markdown('<div class="app-title">Delivery Schedule Optimiser</div>', unsafe_a
 # State: 3x3 distance matrix; postcode→label cache
 # ------------------------------------------------------------------------------
 def default_distance():
-    # Default distances (miles) used until you fetch from Google Maps
     return pd.DataFrame(
         [[10, 20, 30],
          [15, 10, 25],
@@ -58,15 +53,13 @@ def default_distance():
 if "dist_df" not in st.session_state:
     st.session_state.dist_df = default_distance()
 
-# postcode→"POSTCODE (Town)" labels used above inputs
 if "pc_labels" not in st.session_state:
-    st.session_state.pc_labels = {}  # {"D1": "PA3 3BW (Paisley)", ...}
+    st.session_state.pc_labels = {}  # e.g. {"D1": "PA3 3BW (Paisley)"}
 
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
 def extract_town_from_components(components):
-    # Prefer UK postal_town, then locality, then county/region
     prefs = ["postal_town", "locality", "administrative_area_level_2", "administrative_area_level_1"]
     for pref in prefs:
         for comp in components:
@@ -75,7 +68,6 @@ def extract_town_from_components(components):
     return ""
 
 def geocode_postcode(gmaps, postcode):
-    # Return "POSTCODE (Town)" where possible
     try:
         res = gmaps.geocode(postcode, components={"country": "GB"})
         if not res:
@@ -87,11 +79,9 @@ def geocode_postcode(gmaps, postcode):
         return postcode.upper()
 
 def label_for(slot_key, raw_pc_default):
-    # Use cached "POSTCODE (Town)" if present; else the raw postcode; else the slot key
     return st.session_state.pc_labels.get(slot_key) or (raw_pc_default.upper() if raw_pc_default else slot_key)
 
 def safe_sheet(name: str) -> str:
-    # Excel sheet names cannot contain []:*?/\\ and must be <= 31 chars
     invalid = set(r'[]:*?/\\')
     cleaned = "".join(c for c in name if c not in invalid)
     trimmed = cleaned[:31]
@@ -117,7 +107,6 @@ with st.sidebar:
 
     round_miles = st.checkbox("Round to 1 decimal place", value=True)
 
-    # Fetch distances
     if st.button("Fetch distances (3x3)"):
         if not api_key:
             st.error("Please provide an API key.")
@@ -164,7 +153,6 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Request failed: {e}")
 
-    # Optional manual label refresh
     if st.button("Look up place names"):
         if not api_key:
             st.error("Please provide an API key.")
@@ -193,7 +181,6 @@ s2_label = label_for("S2", s2_pc if "s2_pc" in locals() else "S2")
 s3_label = label_for("S3", s3_pc if "s3_pc" in locals() else "S3")
 
 with st.form("delivery_form", clear_on_submit=False):
-    # Headings row aligned with input groups
     hdr_left, hdr_right, hdr_rate = st.columns([3, 3, 0.9], gap="small")
     with hdr_left:
         st.markdown("**Quantity at depot**")
@@ -202,7 +189,6 @@ with st.form("delivery_form", clear_on_submit=False):
     with hdr_rate:
         st.markdown("**Rate (GBP/mi)**")
 
-    # Inputs row
     left_grp, right_grp, rate_grp = st.columns([3, 3, 0.9], gap="small")
 
     with left_grp:
@@ -244,49 +230,63 @@ with st.form("delivery_form", clear_on_submit=False):
     submitted = st.form_submit_button("Submit and optimise")
 
 # ------------------------------------------------------------------------------
-# Solver (transportation LP)
+# Solver (transportation LP with store capacities as upper bounds)
 # ------------------------------------------------------------------------------
-def transport_min_cost(cost_mat, supply, demand):
+def transport_min_cost_with_capacity(cost_mat, supply, capacity):
+    """
+    Minimise sum(c_ij * x_ij)
+    s.t.  For each depot i:  sum_j x_ij = supply_i          (use all supply)
+          For each store j:  sum_i x_ij <= capacity_j       (do not exceed capacity)
+          x_ij >= 0
+    """
     m, n = cost_mat.shape
     c = cost_mat.reshape(-1)
     bounds = [(0, None)] * (m * n)
 
-    A_eq = []
-    b_eq = []
-    # supply rows
+    A_eq, b_eq = [], []
+    A_ub, b_ub = [], []
+
+    # supply equalities
     for i in range(m):
         row = np.zeros(m * n)
         for j in range(n):
-            row[i * n + j] = 1
+            row[i * n + j] = 1.0
         A_eq.append(row)
         b_eq.append(supply[i])
-    # demand cols
+
+    # store capacity upper bounds
     for j in range(n):
         row = np.zeros(m * n)
         for i in range(m):
-            row[i * n + j] = 1
-        A_eq.append(row)
-        b_eq.append(demand[j])
+            row[i * n + j] = 1.0
+        A_ub.append(row)
+        b_ub.append(capacity[j])
 
-    res = linprog(c, A_eq=np.array(A_eq), b_eq=np.array(b_eq), bounds=bounds, method="highs")
+    res = linprog(
+        c,
+        A_ub=np.array(A_ub), b_ub=np.array(b_ub),
+        A_eq=np.array(A_eq), b_eq=np.array(b_eq),
+        bounds=bounds,
+        method="highs",
+    )
     return res
 
 if submitted:
     supply = np.array([d1_supply, d2_supply, d3_supply], dtype=float)
-    demand = np.array([s1_cap, s2_cap, s3_cap], dtype=float)
+    capacity = np.array([s1_cap, s2_cap, s3_cap], dtype=float)
 
-    if not np.isclose(supply.sum(), demand.sum()):
+    # Correct feasibility rule: total delivered (total supply) must be <= total store capacity
+    if supply.sum() > capacity.sum():
         st.error(
-            f"Total supply ({int(supply.sum()):,}) must equal total demand ({int(demand.sum()):,}). "
-            "Adjust the numbers and try again."
+            f"Total supply ({int(supply.sum()):,}) exceeds total store capacity "
+            f"({int(capacity.sum()):,}). Adjust the numbers and try again."
         )
         st.stop()
 
-    # Cost matrix = distance (from sidebar state) x rate
     dist = st.session_state.dist_df.to_numpy(dtype=float)
     cost = dist * float(rate_per_mile)
 
-    res = transport_min_cost(cost, supply, demand)
+    res = transport_min_cost_with_capacity(cost, supply, capacity)
     if not res.success:
         st.error("Optimiser failed: " + res.message)
         st.stop()
@@ -310,8 +310,8 @@ if submitted:
             pd.DataFrame([supply], index=["Supply"], columns=["D1", "D2", "D3"]).to_excel(
                 writer, sheet_name=safe_sheet("Supply")
             )
-            pd.DataFrame([demand], index=["Capacity"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name=safe_sheet("Demand")
+            pd.DataFrame([capacity], index=["Capacity"], columns=["S1", "S2", "S3"]).to_excel(
+                writer, sheet_name=safe_sheet("Store Capacity")
             )
         st.download_button(
             label="Download XLSX of the optimised schedule",
@@ -319,3 +319,4 @@ if submitted:
             file_name="delivery_schedule_optimised.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
