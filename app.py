@@ -4,7 +4,7 @@
 # - If total supply > total store capacity, show an error and stop.
 # - Sidebar: Google Maps 3x3 Distance Matrix (via place IDs) + Geocoding for labels
 # - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
-# - On submit: show one-line cost and an optimised schedule table (towns, with totals)
+# - On submit: show distance table, optimised schedule (with totals), and one-line cost at the end.
 
 import numpy as np
 import pandas as pd
@@ -58,7 +58,6 @@ if "pc_labels" not in st.session_state:
 # Helpers
 # ------------------------------------------------------------------------------
 def extract_town_from_components(components):
-    # Prefer UK postal_town, then locality, then county/region
     prefs = ["postal_town", "locality", "administrative_area_level_2", "administrative_area_level_1"]
     for pref in prefs:
         for comp in components:
@@ -67,7 +66,6 @@ def extract_town_from_components(components):
     return ""
 
 def geocode_postcode(gmaps, postcode):
-    # Return "POSTCODE (Town)" where possible
     try:
         res = gmaps.geocode(postcode, components={"country": "GB"})
         if not res:
@@ -79,11 +77,9 @@ def geocode_postcode(gmaps, postcode):
         return postcode.upper()
 
 def label_for(slot_key, raw_pc_default):
-    # Cached "POSTCODE (Town)" if present; else the raw postcode; else slot key
     return st.session_state.pc_labels.get(slot_key) or (raw_pc_default.upper() if raw_pc_default else slot_key)
 
 def display_name(label: str) -> str:
-    # Prefer the town inside parentheses; else return the label itself
     if "(" in label and ")" in label:
         inside = label.split("(", 1)[1].split(")", 1)[0].strip()
         if inside:
@@ -139,7 +135,6 @@ with st.sidebar:
                     region="uk",
                 )
 
-                # Build miles matrix + a parallel status matrix
                 miles = np.full((3, 3), np.nan, dtype=float)
                 status = [[""] * 3 for _ in range(3)]
                 for i in range(3):
@@ -154,7 +149,6 @@ with st.sidebar:
                 st.session_state.dist_df.loc[:, :] = miles
                 st.success("Distance matrix updated.")
 
-                # Diagnostics: per-cell status and the distances
                 st.caption("Element statuses (non-OK means blank cell):")
                 st.dataframe(
                     pd.DataFrame(status, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]),
@@ -308,11 +302,11 @@ if submitted:
         )
         st.stop()
 
-    # Compute cost matrix; replace missing distances (NaN) with a huge number to avoid those routes
+    # Cost matrix; replace missing distances (NaN) with a huge number to avoid those routes
     dist = st.session_state.dist_df.to_numpy(dtype=float)
     if np.isnan(dist).any():
         st.warning("Some routes had no distance; assigning a very large cost to discourage their use.")
-    dist_filled = np.where(np.isnan(dist), 1e9, dist)  # huge miles so they won't be chosen
+    dist_filled = np.where(np.isnan(dist), 1e9, dist)
     cost = dist_filled * float(rate_per_mile)
 
     res = transport_min_cost_with_capacity(cost, supply, capacity)
@@ -322,14 +316,18 @@ if submitted:
 
     plan = res.x.reshape(3, 3)
 
-    # Cost (from unrounded plan)
-    total_cost = int(round((plan * cost).sum(), 0))
-    st.success(f"Optimised cost of delivery: £{total_cost:,}")
-
-    # Build a human-friendly table with towns and totals
+    # ---------- Presentation ----------
     depot_labels = [display_name(d1_label), display_name(d2_label), display_name(d3_label)]
     store_labels = [display_name(s1_label), display_name(s2_label), display_name(s3_label)]
 
+    # 1) Distance table (before schedule)
+    dist_display = pd.DataFrame(st.session_state.dist_df.to_numpy(dtype=float),
+                                index=depot_labels, columns=store_labels)
+    dist_display = dist_display.round(1).replace({np.nan: ""})
+    st.markdown("**Distance from depots to stores (miles)**")
+    st.dataframe(dist_display, use_container_width=True)
+
+    # 2) Optimised schedule (units) with row/col totals
     schedule = pd.DataFrame(np.rint(plan).astype(int), index=depot_labels, columns=store_labels)
     schedule["Total"] = schedule.sum(axis=1)
     total_row = schedule.sum(axis=0).to_frame().T
@@ -339,3 +337,6 @@ if submitted:
     st.markdown("**Optimised delivery schedule (units)**")
     st.dataframe(schedule_with_totals.style.format("{:,}"), use_container_width=True)
 
+    # 3) One-line cost beneath the tables
+    total_cost = int(round((plan * cost).sum(), 0))
+    st.markdown(f"**Optimised cost of delivery:** £{total_cost:,}")
