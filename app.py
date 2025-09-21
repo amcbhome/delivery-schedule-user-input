@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Delivery Schedule Optimiser — compact UI with postcode→town labels
 # - Store numbers are CAPACITIES (upper bounds). Model ships all depot supply, without exceeding capacities.
-# - If total supply > total store capacity, show an error and stop (user must adjust and resubmit).
-# - Sidebar: Google Maps 3x3 Distance Matrix (+ Geocoding for labels)
+# - If total supply > total store capacity, show an error and stop.
+# - Sidebar: Google Maps 3x3 Distance Matrix (+ optional Geocoding for labels)
 # - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
-# - Output: "Optimised cost of delivery: £X" (no decimals)
-# - Optional XLSX download (safe sheet names)
+# - On submit: show one-line cost and an optimised schedule table with totals.
 
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -54,7 +52,7 @@ if "dist_df" not in st.session_state:
     st.session_state.dist_df = default_distance()
 
 if "pc_labels" not in st.session_state:
-    st.session_state.pc_labels = {}  # e.g. {"D1": "PA3 3BW (Paisley)"}
+    st.session_state.pc_labels = {}  # e.g. {"D1": "PA3 3BW (Paisley)", ...}
 
 # ------------------------------------------------------------------------------
 # Helpers
@@ -81,11 +79,13 @@ def geocode_postcode(gmaps, postcode):
 def label_for(slot_key, raw_pc_default):
     return st.session_state.pc_labels.get(slot_key) or (raw_pc_default.upper() if raw_pc_default else slot_key)
 
-def safe_sheet(name: str) -> str:
-    invalid = set(r'[]:*?/\\')
-    cleaned = "".join(c for c in name if c not in invalid)
-    trimmed = cleaned[:31]
-    return trimmed or "Sheet1"
+def display_name(label: str) -> str:
+    # Prefer the town inside parentheses; else return the label itself
+    if "(" in label and ")" in label:
+        inside = label.split("(", 1)[1].split(")", 1)[0].strip()
+        if inside:
+            return inside
+    return label
 
 # ------------------------------------------------------------------------------
 # Sidebar — Google Maps Distance Matrix + place-name lookup
@@ -226,7 +226,6 @@ with st.form("delivery_form", clear_on_submit=False):
         rate_per_mile = st.number_input("Rate", key="rate_per_mile", min_value=0.0,
                                         step=0.10, value=5.00, label_visibility="collapsed", format="%.2f")
 
-    want_xlsx = st.checkbox("Offer an XLSX download of the optimised schedule")
     submitted = st.form_submit_button("Submit and optimise")
 
 # ------------------------------------------------------------------------------
@@ -292,31 +291,22 @@ if submitted:
         st.stop()
 
     plan = res.x.reshape(3, 3)
-    plan_df = pd.DataFrame(plan, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"])
 
+    # ---- Present results ----
+    # Cost (compute from unrounded plan), then display no decimals with thousands separators
     total_cost = int(round((plan * cost).sum(), 0))
     st.success(f"Optimised cost of delivery: £{total_cost:,}")
 
-    if want_xlsx:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            plan_df.to_excel(writer, sheet_name=safe_sheet("Optimised Plan"))
-            pd.DataFrame(cost, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name=safe_sheet("Cost Matrix (GBP per unit)")
-            )
-            pd.DataFrame(dist, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name=safe_sheet("Distance (miles)")
-            )
-            pd.DataFrame([supply], index=["Supply"], columns=["D1", "D2", "D3"]).to_excel(
-                writer, sheet_name=safe_sheet("Supply")
-            )
-            pd.DataFrame([capacity], index=["Capacity"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name=safe_sheet("Store Capacity")
-            )
-        st.download_button(
-            label="Download XLSX of the optimised schedule",
-            data=output.getvalue(),
-            file_name="delivery_schedule_optimised.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    # Build a human-friendly table: towns as headers if available
+    depot_labels = [display_name(d1_label), display_name(d2_label), display_name(d3_label)]
+    store_labels = [display_name(s1_label), display_name(s2_label), display_name(s3_label)]
+
+    schedule = pd.DataFrame(np.rint(plan).astype(int), index=depot_labels, columns=store_labels)
+    schedule["Total"] = schedule.sum(axis=1)
+    total_row = schedule.sum(axis=0).to_frame().T
+    total_row.index = ["Total"]
+    schedule_with_totals = pd.concat([schedule, total_row], axis=0)
+
+    st.markdown("**Optimised delivery schedule (units)**")
+    st.dataframe(schedule_with_totals.style.format("{:,}"), use_container_width=True)
 
