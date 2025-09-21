@@ -1,4 +1,6 @@
-streamlit
-numpy
-pandas
-scipy
+streamlit>=1.36
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+googlemaps>=4.10
+
