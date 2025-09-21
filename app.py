@@ -7,80 +7,124 @@ st.title("TV Delivery Optimizer")
 
 st.markdown("""
 **Minimize the total delivery cost** from depots to stores.  
-Adjust depot supplies, store capacities, £/mile, and the depot–store distance matrix.
+Use the sidebar to adjust depot supplies, store capacities, cost per mile,  
+and the depot–store distance matrix.
 """)
 
 # -----------------------------
-# Sidebar inputs
+# Defaults
 # -----------------------------
-st.sidebar.header("Inputs")
-
-# Labels
-depot_labels = ["D1", "D2", "D3"]
-store_labels = ["Store 1", "Store 2", "Store 3"]
-
-# Depot supply table
-st.sidebar.subheader("Depot Supply (units)")
-default_supply_df = pd.DataFrame({"Supply": [2500, 3100, 1250]}, index=depot_labels)
-supply_df = st.sidebar.data_editor(
-    default_supply_df,
-    use_container_width=True,
-    num_rows="fixed",
-    disabled=False
-)
-depot_supply = supply_df["Supply"].to_list()
-
-# Store capacity table
-st.sidebar.subheader("Store Capacities (units)")
-default_caps_df = pd.DataFrame({"Capacity": [2000, 3000, 2000]}, index=store_labels)
-caps_df = st.sidebar.data_editor(
-    default_caps_df,
-    use_container_width=True,
-    num_rows="fixed",
-    disabled=False
-)
-store_caps = caps_df["Capacity"].to_list()
-
-# Cost per mile
-cost_per_mile = st.sidebar.number_input("Cost per mile (£)", min_value=1, value=5, step=1)
-
-# Distance matrix
-st.sidebar.subheader("Distances (miles)")
-default_dist_df = pd.DataFrame(
+default_supply_df = pd.DataFrame({"Supply": [2500, 3100, 1250]}, index=["D1", "D2", "D3"])
+default_caps_df   = pd.DataFrame({"Capacity": [2000, 3000, 2000]}, index=["Store 1", "Store 2", "Store 3"])
+default_dist_df   = pd.DataFrame(
     [[22, 33, 40],
      [27, 30, 22],
      [36, 20, 25]],
-    index=depot_labels, columns=store_labels
+    index=["D1", "D2", "D3"], columns=["Store 1", "Store 2", "Store 3"]
 )
-dist_df = st.sidebar.data_editor(
-    default_dist_df,
-    use_container_width=True,
-    num_rows="fixed",
-    disabled=False
-)
+default_rate_df   = pd.DataFrame({"£/mile": [5]})
 
-# Coerce to numeric just in case
-supply_df = supply_df.apply(pd.to_numeric, errors="coerce").fillna(0)
-caps_df = caps_df.apply(pd.to_numeric, errors="coerce").fillna(0)
-dist_df = dist_df.apply(pd.to_numeric, errors="coerce").fillna(0)
+# -----------------------------
+# Initialize session state
+# -----------------------------
+if "supply_df" not in st.session_state:
+    st.session_state.supply_df = default_supply_df.copy()
+if "caps_df" not in st.session_state:
+    st.session_state.caps_df = default_caps_df.copy()
+if "dist_df" not in st.session_state:
+    st.session_state.dist_df = default_dist_df.copy()
+if "rate_df" not in st.session_state:
+    st.session_state.rate_df = default_rate_df.copy()
 
-depot_supply = supply_df["Supply"].to_numpy()
-store_caps = caps_df["Capacity"].to_numpy()
-distances = dist_df.to_numpy()
+# Reset button with toast + rerun
+if st.sidebar.button("🔄 Reset to Defaults"):
+    st.session_state.supply_df = default_supply_df.copy()
+    st.session_state.caps_df   = default_caps_df.copy()
+    st.session_state.dist_df   = default_dist_df.copy()
+    st.session_state.rate_df   = default_rate_df.copy()
+    st.toast("Inputs reset to defaults ✅")
+    st.experimental_rerun()
+
+# -----------------------------
+# Sidebar tabs (editable tables)
+# -----------------------------
+st.sidebar.header("Inputs")
+tabs = st.sidebar.tabs(["Depot Supply", "Store Capacities", "Distances", "Cost per Mile"])
+
+with tabs[0]:
+    st.session_state.supply_df = st.data_editor(
+        st.session_state.supply_df, use_container_width=True, num_rows="fixed"
+    )
+with tabs[1]:
+    st.session_state.caps_df = st.data_editor(
+        st.session_state.caps_df, use_container_width=True, num_rows="fixed"
+    )
+with tabs[2]:
+    st.session_state.dist_df = st.data_editor(
+        st.session_state.dist_df, use_container_width=True, num_rows="fixed"
+    )
+with tabs[3]:
+    st.session_state.rate_df = st.data_editor(
+        st.session_state.rate_df, use_container_width=True, num_rows="fixed"
+    )
+
+# Extract numeric arrays
+depot_supply  = st.session_state.supply_df["Supply"].to_numpy(dtype=float)
+store_caps    = st.session_state.caps_df["Capacity"].to_numpy(dtype=float)
+distances     = st.session_state.dist_df.to_numpy(dtype=float)
+cost_per_mile = float(st.session_state.rate_df["£/mile"].iloc[0])
+
+# -----------------------------
+# Inputs used (summary)
+# -----------------------------
+st.markdown("## Inputs used")
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown("**Depot Supply (units)**")
+    st.dataframe(st.session_state.supply_df, use_container_width=True, hide_index=False)
+    st.markdown("**Cost per Mile**")
+    st.dataframe(st.session_state.rate_df, use_container_width=True, hide_index=True)
+with c2:
+    st.markdown("**Store Capacities (units)**")
+    st.dataframe(st.session_state.caps_df, use_container_width=True, hide_index=False)
+
+st.markdown("**Distances (miles)**")
+st.dataframe(st.session_state.dist_df, use_container_width=True, hide_index=False)
+
+# -----------------------------
+# Pre-check: supply vs capacity
+# -----------------------------
+total_supply = depot_supply.sum()
+total_capacity = store_caps.sum()
+
+if total_supply > total_capacity:
+    st.warning(
+        f"⚠️ Total supply ({total_supply:,.0f}) exceeds total store capacity ({total_capacity:,.0f}). "
+        "Not all TVs can be delivered."
+    )
+elif total_supply < total_capacity:
+    st.info(
+        f"ℹ️ Total supply ({total_supply:,.0f}) is less than total store capacity ({total_capacity:,.0f}). "
+        "Some capacity will remain unused."
+    )
+else:
+    st.success(
+        f"✅ Balanced: total supply ({total_supply:,.0f}) equals total store capacity ({total_capacity:,.0f})."
+    )
 
 # -----------------------------
 # Linear program
 # -----------------------------
 c = (distances * cost_per_mile).flatten()
 
-# Store (capacity) constraints: sum over depots to each store <= capacity
+# Store capacity: sum_i x_{i,j} <= cap_j
 A_store = np.zeros((3, 9))
 for j in range(3):
     for i in range(3):
         A_store[j, 3*i + j] = 1
 b_store = store_caps
 
-# Depot (supply) constraints: sum to all stores = supply
+# Depot supply: sum_j x_{i,j} = supply_i
 A_depot = np.zeros((3, 9))
 for i in range(3):
     A_depot[i, 3*i:3*i+3] = 1
@@ -101,7 +145,6 @@ res = linprog(
 # -----------------------------
 st.markdown("## Results")
 if res.success:
-    total_cost = float(res.fun)
-    st.write(f"### 💰 Cost of delivery: £{total_cost:,.0f}")
+    st.write(f"### 💰 Cost of delivery: £{float(res.fun):,.0f}")
 else:
     st.error("Optimization failed: " + res.message)
