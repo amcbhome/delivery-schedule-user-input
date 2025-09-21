@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Delivery Schedule Optimiser — compact UI with postcode→town labels
-# - Sidebar: Google Maps 3×3 Distance Matrix (+ optional Geocoding for labels)
+# - Sidebar: Google Maps 3x3 Distance Matrix (+ optional Geocoding for labels)
 # - Main: 3 depot supplies, 3 store capacities, 1 rate (single compact row)
 # - Totals must match (no auto-balance)
 # - Output: "Optimised cost of delivery: £X" (no decimals)
@@ -44,9 +44,10 @@ div.stButton > button, button[kind="primary"] { padding: .4rem .8rem; }
 st.markdown('<div class="app-title">Delivery Schedule Optimiser</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# State: 3×3 distance matrix; postcode→label cache
+# State: 3x3 distance matrix; postcode→label cache
 # ------------------------------------------------------------------------------
 def default_distance():
+    # Default distances (miles) used until you fetch from Google Maps
     return pd.DataFrame(
         [[10, 20, 30],
          [15, 10, 25],
@@ -62,7 +63,7 @@ if "pc_labels" not in st.session_state:
     st.session_state.pc_labels = {}  # {"D1": "PA3 3BW (Paisley)", ...}
 
 # ------------------------------------------------------------------------------
-# Helpers for Geocoding labels
+# Helpers
 # ------------------------------------------------------------------------------
 def extract_town_from_components(components):
     # Prefer UK postal_town, then locality, then county/region
@@ -85,12 +86,23 @@ def geocode_postcode(gmaps, postcode):
     except Exception:
         return postcode.upper()
 
+def label_for(slot_key, raw_pc_default):
+    # Use cached "POSTCODE (Town)" if present; else the raw postcode; else the slot key
+    return st.session_state.pc_labels.get(slot_key) or (raw_pc_default.upper() if raw_pc_default else slot_key)
+
+def safe_sheet(name: str) -> str:
+    # Excel sheet names cannot contain []:*?/\\ and must be <= 31 chars
+    invalid = set(r'[]:*?/\\')
+    cleaned = "".join(c for c in name if c not in invalid)
+    trimmed = cleaned[:31]
+    return trimmed or "Sheet1"
+
 # ------------------------------------------------------------------------------
 # Sidebar — Google Maps Distance Matrix + place-name lookup
 # ------------------------------------------------------------------------------
 with st.sidebar:
     st.header("Driving distance (Google Maps)")
-    st.caption("Fetch the 3×3 distance matrix in miles. Labels can show the town via Geocoding.")
+    st.caption("Fetch the 3x3 distance matrix in miles. Labels can show the town via Geocoding.")
 
     default_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "") if hasattr(st, "secrets") else ""
     api_key = st.text_input("Google Maps API key", value=default_key, type="password")
@@ -106,7 +118,7 @@ with st.sidebar:
     round_miles = st.checkbox("Round to 1 decimal place", value=True)
 
     # Fetch distances
-    if st.button("Fetch distances (3×3)"):
+    if st.button("Fetch distances (3x3)"):
         if not api_key:
             st.error("Please provide an API key.")
         elif googlemaps is None:
@@ -173,10 +185,6 @@ with st.sidebar:
 # ------------------------------------------------------------------------------
 # Main form — headings + compact inputs with wrapped captions
 # ------------------------------------------------------------------------------
-def label_for(slot_key, raw_pc_default):
-    # Use cached "POSTCODE (Town)" if present; else the raw postcode; else the slot key
-    return st.session_state.pc_labels.get(slot_key) or raw_pc_default.upper() or slot_key
-
 d1_label = label_for("D1", d1_pc if "d1_pc" in locals() else "D1")
 d2_label = label_for("D2", d2_pc if "d2_pc" in locals() else "D2")
 d3_label = label_for("D3", d3_pc if "d3_pc" in locals() else "D3")
@@ -274,7 +282,7 @@ if submitted:
         )
         st.stop()
 
-    # Cost matrix = distance (from sidebar state) × rate
+    # Cost matrix = distance (from sidebar state) x rate
     dist = st.session_state.dist_df.to_numpy(dtype=float)
     cost = dist * float(rate_per_mile)
 
@@ -292,18 +300,18 @@ if submitted:
     if want_xlsx:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            plan_df.to_excel(writer, sheet_name="Optimised Plan")
+            plan_df.to_excel(writer, sheet_name=safe_sheet("Optimised Plan"))
             pd.DataFrame(cost, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name="Cost Matrix (GBP/unit)"
+                writer, sheet_name=safe_sheet("Cost Matrix (GBP per unit)")
             )
             pd.DataFrame(dist, index=["D1", "D2", "D3"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name="Distance (miles)"
+                writer, sheet_name=safe_sheet("Distance (miles)")
             )
             pd.DataFrame([supply], index=["Supply"], columns=["D1", "D2", "D3"]).to_excel(
-                writer, sheet_name="Supply"
+                writer, sheet_name=safe_sheet("Supply")
             )
             pd.DataFrame([demand], index=["Capacity"], columns=["S1", "S2", "S3"]).to_excel(
-                writer, sheet_name="Demand"
+                writer, sheet_name=safe_sheet("Demand")
             )
         st.download_button(
             label="Download XLSX of the optimised schedule",
@@ -311,4 +319,3 @@ if submitted:
             file_name="delivery_schedule_optimised.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
