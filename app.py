@@ -6,47 +6,60 @@ from scipy.optimize import linprog
 st.title("TV Delivery Optimizer")
 
 st.markdown("""
-**This app minimizes the total delivery cost of transporting televisions from depots to stores.**  
-Adjust depot supplies, store capacities, cost per mile, and the depot-to-store distance matrix.
+**Minimize total delivery cost** from depots to stores.  
+Set depot supplies, store capacities, **£/mile**, and edit the **3×3 distance matrix**.
 """)
 
 # -----------------------------
-# User Inputs
+# Sidebar inputs
 # -----------------------------
 st.sidebar.header("Inputs")
 
+# Labels
+depot_labels = ["D1", "D2", "D3"]
+store_labels = ["Store 1", "Store 2", "Store 3"]
+
 # Depot supply
 st.sidebar.subheader("Depot Supply")
-depot_labels = ["D1", "D2", "D3"]
-depot_supply = [st.sidebar.number_input(f"{d} supply", min_value=0, value=val)
-                for d, val in zip(depot_labels, [2500, 3100, 1250])]
+default_supply = [2500, 3100, 1250]
+depot_supply = [
+    st.sidebar.number_input(f"{d} supply", min_value=0, value=val, step=50)
+    for d, val in zip(depot_labels, default_supply)
+]
 
 # Store capacities
 st.sidebar.subheader("Store Capacities")
-store_labels = ["Store 1", "Store 2", "Store 3"]
-store_caps = [st.sidebar.number_input(f"{s} capacity", min_value=0, value=val)
-              for s, val in zip(store_labels, [2000, 3000, 2000])]
+default_caps = [2000, 3000, 2000]
+store_caps = [
+    st.sidebar.number_input(f"{s} capacity", min_value=0, value=val, step=50)
+    for s, val in zip(store_labels, default_caps)
+]
 
 # Cost per mile
-cost_per_mile = st.sidebar.number_input("Cost per mile (£)", min_value=1, value=5)
+cost_per_mile = st.sidebar.number_input("Cost per mile (£)", min_value=1, value=5, step=1)
 
-# Distance matrix input
-st.sidebar.subheader("Distances (miles)")
-distances = []
-for i, d in enumerate(depot_labels):
-    row = []
-    for j, s in enumerate(store_labels):
-        default_vals = [[22, 33, 40],
-                        [27, 30, 22],
-                        [36, 20, 25]]
-        val = st.sidebar.number_input(f"{d} → {s}", min_value=1, value=default_vals[i][j])
-        row.append(val)
-    distances.append(row)
+# 3×3 distance matrix editor
+st.sidebar.subheader("Distances (miles) — 3×3 Matrix")
+default_dist_df = pd.DataFrame(
+    [[22, 33, 40],
+     [27, 30, 22],
+     [36, 20, 25]],
+    index=depot_labels, columns=store_labels
+)
 
-distances = np.array(distances)
+dist_df = st.sidebar.data_editor(
+    default_dist_df,
+    use_container_width=True,
+    num_rows="fixed",
+    disabled=False
+)
+
+# Coerce to numeric just in case
+dist_df = dist_df.apply(pd.to_numeric, errors="coerce").fillna(0)
+distances = dist_df.to_numpy()
 
 # -----------------------------
-# Linear Programming Setup
+# Linear program
 # -----------------------------
 c = (distances * cost_per_mile).flatten()
 
@@ -65,7 +78,6 @@ b_depot = depot_supply
 
 bounds = [(0, None) for _ in range(9)]
 
-# Solve
 res = linprog(
     c=c,
     A_ub=A_store, b_ub=b_store,
@@ -75,13 +87,11 @@ res = linprog(
 )
 
 # -----------------------------
-# Output
+# Output (minimal)
 # -----------------------------
 st.markdown("## Results")
-
 if res.success:
     total_cost = float(res.fun)
     st.write(f"### 💰 Cost of delivery: £{total_cost:,.0f}")
 else:
     st.error("Optimization failed: " + res.message)
-
